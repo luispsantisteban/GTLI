@@ -15,15 +15,28 @@ import Link from 'next/link'
 export default function FeedbackPage() {
   const { id: sessionId } = useParams<{ id: string }>()
   const [feedback, setFeedback] = useState<FeedbackObject | null>(null)
+  const [metadata, setMetadata] = useState<DeepgramMetadata | null>(null)
   const [progress, setProgress] = useState('Generating feedback…')
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!sessionId) return
-    const es = new EventSource(`/api/feedback/generate`)
-    // Use fetch+SSE since we need a POST
-    generateFeedback()
-  }, [sessionId])
+
+    // First try loading existing feedback from DB
+    fetch(`/api/session/${sessionId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.feedback) {
+          setFeedback(data.feedback as FeedbackObject)
+        } else {
+          generateFeedback()
+        }
+        if (data.transcript?.deepgramMetadata) {
+          setMetadata(data.transcript.deepgramMetadata as DeepgramMetadata)
+        }
+      })
+      .catch(() => generateFeedback())
+  }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function generateFeedback() {
     try {
@@ -32,21 +45,21 @@ export default function FeedbackPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId }),
       })
-
-      const reader = res.body?.getReader()
+      if (!res.body) return
+      const reader = res.body.getReader()
       const decoder = new TextDecoder()
-      if (!reader) return
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
         const text = decoder.decode(value)
-        const lines = text.split('\n').filter(l => l.startsWith('data: '))
-        for (const line of lines) {
-          const data = JSON.parse(line.slice(6))
-          if (data.type === 'progress') setProgress(data.message)
-          if (data.type === 'complete') setFeedback(data.feedback)
-          if (data.type === 'error') setError(data.message)
+        for (const line of text.split('\n').filter(l => l.startsWith('data: '))) {
+          try {
+            const data = JSON.parse(line.slice(6))
+            if (data.type === 'progress') setProgress(data.message)
+            if (data.type === 'complete') setFeedback(data.feedback)
+            if (data.type === 'error') setError(data.message)
+          } catch { /* partial chunk */ }
         }
       }
     } catch (err) {
@@ -54,11 +67,13 @@ export default function FeedbackPage() {
     }
   }
 
-  const mockMetadata: DeepgramMetadata = {
-    wordsPerMinute: feedback ? 135 : 0,
-    longSilences: 1,
-    fillerWords: feedback?.scores.filler_words ? Math.max(0, (10 - feedback.scores.filler_words) * 2) : 0,
-    avgConfidence: 0.93,
+  const voiceMetadata: DeepgramMetadata = metadata ?? {
+    wordsPerMinute: 0,
+    longSilences: 0,
+    fillerWords: feedback?.scores?.filler_words
+      ? Math.max(0, (10 - feedback.scores.filler_words) * 2)
+      : 0,
+    avgConfidence: 0.9,
   }
 
   if (error) {
@@ -81,7 +96,7 @@ export default function FeedbackPage() {
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <h1 className="text-2xl font-bold text-gray-900">Session Feedback</h1>
         <div className="flex gap-2">
           <Link href={`/coach/${sessionId}`}>
@@ -96,7 +111,7 @@ export default function FeedbackPage() {
       <ScoreCard feedback={feedback} />
       <ConversationTimeline timeline={feedback.timeline} />
       <QuoteHighlights highlights={feedback.highlights} />
-      <VoiceSignals metadata={mockMetadata} />
+      <VoiceSignals metadata={voiceMetadata} />
     </div>
   )
 }
